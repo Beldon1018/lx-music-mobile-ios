@@ -1,0 +1,106 @@
+name: Build iOS (unsigned)
+
+on:
+  workflow_dispatch:
+    inputs:
+      configuration:
+        description: 'Build configuration'
+        required: true
+        default: 'Release'
+        type: choice
+        options:
+          - Release
+          - Debug
+  push:
+    branches:
+      - ios
+
+jobs:
+  build:
+    name: iOS unsigned build
+    runs-on: macos-14
+    steps:
+      - name: Check out git repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+
+      - name: Setup Ruby / CocoaPods
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.1'
+          bundler-cache: true
+          working-directory: ios
+
+      - name: Cache node modules
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-npm-${{ hashFiles('package-lock.json') }}
+          restore-keys: ${{ runner.os }}-npm-
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Apply dependency patches
+        run: node dependencies-patch.js
+
+      - name: Add Live Activity widget target
+        working-directory: ios
+        run: |
+          gem install xcodeproj --no-document
+          ruby setup_widget.rb
+
+      - name: Cache CocoaPods
+        uses: actions/cache@v4
+        with:
+          path: ios/Pods
+          key: ${{ runner.os }}-pods-${{ hashFiles('ios/Podfile.lock') }}
+
+      - name: Install pods
+        working-directory: ios
+        env:
+          NO_FLIPPER: '1'
+        run: pod install --repo-update
+
+      - name: Build unsigned archive
+        working-directory: ios
+        env:
+          CONFIGURATION: ${{ inputs.configuration || 'Release' }}
+        run: |
+          xcodebuild \
+            -workspace LxMusicMobile.xcworkspace \
+            -scheme LxMusicMobile \
+            -configuration "$CONFIGURATION" \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -archivePath build/LxMusicMobile.xcarchive \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            PROVISIONING_PROFILE_SPECIFIER="" \
+            ENABLE_BITCODE=NO \
+            clean archive
+
+      - name: Produce unsigned IPA
+        working-directory: ios
+        run: |
+          mkdir -p build/IPA/Payload
+          cp -R build/LxMusicMobile.xcarchive/Products/Applications/LxMusicMobile.app build/IPA/Payload/
+          cd build/IPA
+          zip -qry ../LxMusicMobile-unsigned.ipa Payload
+          cd ..
+          shasum -a 256 LxMusicMobile-unsigned.ipa
+
+      - name: Get package version
+        run: echo "VERSION=$(node -p "require('./package.json').version")" >> $GITHUB_ENV
+
+      - name: Upload unsigned IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: LxMusicMobile-ios-unsigned-${{ env.VERSION }}
+          path: ios/build/LxMusicMobile-unsigned.ipa
+          if-no-files-found: error
